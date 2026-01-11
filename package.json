@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "react": "^19.2.0",
+    "react-chartjs-2": "^5.3.1",
     "react-dom": "^19.2.0",
     "transaction-analyzer": "file:../transaction-analyzer"
   },
