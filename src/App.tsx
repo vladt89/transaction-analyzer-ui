@@ -12,26 +12,26 @@ import {
   Tooltip,
   Legend,
 } from "chart.js";
-import {Bar, Pie} from "react-chartjs-2";
+import { Bar, Pie } from "react-chartjs-2";
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, Title, Tooltip, Legend);
 
+/**
+ * Single-file MVP structure:
+ * - Types: shape of analysis data consumed by the UI
+ * - Helpers: pure transformations (data -> chart configs)
+ * - Components: small presentational pieces (still in one file for simplicity)
+ * - App: state + orchestration (file upload -> analysis -> render)
+ */
+// -------------------- Types --------------------
 type BankName = "Nordea" | "ING";
-
-function detectBank(fileName: string): BankName {
-  return fileName.toLowerCase().includes("ing") ? "ING" : "Nordea";
-}
 
 type MonthlyExpense = {
   month: string;
-  sum: string; // e.g. "1330.84 euros"
+  sum: string;
   categories?: Record<
       string,
-      {
-        amount: number;
-        percentage: number;
-        transactions?: Record<string, string>;
-      }
+      { amount: number; percentage: number; transactions?: Record<string, string> }
   >;
 };
 
@@ -40,19 +40,224 @@ type AnalysisResult = {
   monthlyExpenses: MonthlyExpense[];
 };
 
+// -------------------- Helpers (pure) --------------------
+/** Infer bank type from the uploaded file name (MVP heuristic). */
+function detectBank(fileName: string): BankName {
+  return fileName.toLowerCase().includes("ing") ? "ING" : "Nordea";
+}
+
+/** Extract a numeric amount from strings like "1330.84 euros". */
 function parseEuroAmount(sum: string): number {
-  const match = new RegExp(/-?\d+(?:\.\d+)?/).exec(sum);
+  const match = /-?\d+(?:\.\d+)?/.exec(sum);
   return match ? Number(match[0]) : 0;
 }
 
-
+/** Generate a distinct color per pie slice using HSL. */
 function makePieColors(n: number): string[] {
-  // Distinct colors without hardcoding a palette
   return Array.from({ length: n }, (_, i) => `hsl(${Math.round((360 * i) / n)}, 70%, 60%)`);
 }
 
+/** Build the Chart.js config for the monthly expenses bar chart. */
+function buildMonthlyBarChart(monthlyExpenses: MonthlyExpense[]) {
+  const ordered = [...monthlyExpenses].reverse();
+  const labels = ordered.map((m) => m.month);
+  const values = ordered.map((m) => parseEuroAmount(m.sum));
+  const colors = values.map(() => "rgba(13, 110, 253, 0.4)");
+
+  return {
+    data: {
+      labels,
+      datasets: [{ label: "Expenses per month (€)", data: values, backgroundColor: colors }],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: true },
+        title: { display: true, text: "Monthly expenses" },
+      },
+    } as const,
+  };
+}
+
+/** Convert a month.categories map into a simple { category -> amount } object. */
+function extractMonthCategoryAmounts(m: MonthlyExpense): Record<string, number> {
+  const cats = m.categories ?? {};
+  const out: Record<string, number> = {};
+  for (const [catName, info] of Object.entries(cats)) out[catName] = Number(info.amount) || 0;
+  return out;
+}
+
+/**
+ * Build the Chart.js config for category breakdown.
+ *
+ * - mode = "month": uses the selected month
+ * - mode = "year": aggregates all months present in the analysis
+ */
+function buildCategoryPieChart(args: {
+  monthlyExpenses: MonthlyExpense[];
+  breakdownMode: "month" | "year";
+  selectedMonth: string;
+}) {
+  const { monthlyExpenses, breakdownMode, selectedMonth } = args;
+  let totals: Record<string, number> = {};
+
+  if (breakdownMode === "month") {
+    const monthObj =
+        monthlyExpenses.find((m) => m.month === selectedMonth) ?? monthlyExpenses[0];
+    totals = extractMonthCategoryAmounts(monthObj);
+  } else {
+    for (const m of monthlyExpenses) {
+      const monthTotals = extractMonthCategoryAmounts(m);
+      for (const [cat, amount] of Object.entries(monthTotals)) {
+        totals[cat] = (totals[cat] ?? 0) + amount;
+      }
+    }
+  }
+
+  const entries = Object.entries(totals)
+      .filter(([, v]) => v > 0)
+      .sort((a, b) => b[1] - a[1]);
+
+  if (!entries.length) return null;
+
+  const labels = entries.map(([k]) => k);
+  const values = entries.map(([, v]) => v);
+  const colors = makePieColors(values.length);
+
+  const title =
+      breakdownMode === "month"
+          ? `Category breakdown — ${selectedMonth || monthlyExpenses[0].month}`
+          : "Category breakdown — All months (year)";
+
+  return {
+    data: {
+      labels,
+      datasets: [{ label: "€", data: values, backgroundColor: colors }],
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: true, position: "bottom" as const },
+        title: { display: true, text: title },
+      },
+    } as const,
+  };
+}
+
+// -------------------- Small components (same file) --------------------
+/**
+ * Upload control (button + hidden file input).
+ * Calls `onFile` with the selected CSV file.
+ */
+function UploadButton(props: Readonly<{
+  loading: boolean;
+  onFile: (file: File) => void;
+}>) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  return (
+      <>
+        <input
+            ref={inputRef}
+            type="file"
+            accept=".csv,text/csv"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) props.onFile(f);
+              if (inputRef.current) inputRef.current.value = "";
+            }}
+            style={{ display: "none" }}
+        />
+        <button
+            onClick={() => inputRef.current?.click()}
+            disabled={props.loading}
+            style={{ padding: "10px 16px", cursor: props.loading ? "not-allowed" : "pointer" }}
+        >
+          {props.loading ? "Analyzing…" : "Upload file"}
+        </button>
+      </>
+  );
+}
+
+/** Presentational wrapper for the monthly expenses bar chart. */
+function MonthlyBarChart({ monthlyExpenses }: Readonly<{ monthlyExpenses: MonthlyExpense[] }>) {
+  const chart = useMemo(() => buildMonthlyBarChart(monthlyExpenses), [monthlyExpenses]);
+  return (
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginTop: 12 }}>
+        <Bar data={chart.data} options={chart.options} />
+      </div>
+  );
+}
+
+/**
+ * Controls + pie chart for category breakdown.
+ * Keeps view state (month/year + selected month) in the parent, receives setters.
+ */
+function CategoryBreakdown(props: Readonly<{
+  monthlyExpenses: MonthlyExpense[];
+  breakdownMode: "month" | "year";
+  selectedMonth: string;
+  setBreakdownMode: (v: "month" | "year") => void;
+  setSelectedMonth: (v: string) => void;
+}>) {
+  const months = useMemo(() => props.monthlyExpenses.map((m) => m.month), [props.monthlyExpenses]);
+
+  const pie = useMemo(
+      () =>
+          buildCategoryPieChart({
+            monthlyExpenses: props.monthlyExpenses,
+            breakdownMode: props.breakdownMode,
+            selectedMonth: props.selectedMonth,
+          }),
+      [props.monthlyExpenses, props.breakdownMode, props.selectedMonth]
+  );
+
+  return (
+      <div style={{ marginTop: 24, borderTop: "1px solid #eee", paddingTop: 16 }}>
+        <h2 style={{ margin: "0 0 12px" }}>Category breakdown</h2>
+
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <label>
+            View:{" "}
+            <select
+              value={props.breakdownMode}
+              onChange={(e) => props.setBreakdownMode(e.target.value as "month" | "year")}
+            >
+              <option value="month">Month</option>
+              <option value="year">Year</option>
+            </select>
+          </label>
+
+          {props.breakdownMode === "month" && (
+              <label>
+                Month:{" "}
+                <select value={props.selectedMonth} onChange={(e) => props.setSelectedMonth(e.target.value)}>
+                  {months.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              </label>
+          )}
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          {pie ? (
+              <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
+                <Pie data={pie.data} options={pie.options} />
+              </div>
+          ) : (
+              <div>No category data found for this selection.</div>
+          )}
+        </div>
+      </div>
+  );
+}
+
+// -------------------- App (state + orchestration) --------------------
+/**
+ * Page-level component: owns state and orchestrates file upload -> analysis -> charts.
+ */
 export default function App() {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const analyzer = useMemo(() => new TransactionAnalyzer(), []);
 
   const [loading, setLoading] = useState(false);
@@ -60,14 +265,10 @@ export default function App() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
 
-  // New: category breakdown controls
   const [breakdownMode, setBreakdownMode] = useState<"month" | "year">("month");
   const [selectedMonth, setSelectedMonth] = useState<string>("");
 
-  async function onFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
+  async function analyzeFile(file: File) {
     setLoading(true);
     setError(null);
     setResult(null);
@@ -76,251 +277,52 @@ export default function App() {
     try {
       const csvText = await file.text();
       const bank = detectBank(file.name);
-
       const analysis = (await analyzer.analyzeCsvContent(csvText, bank)) as AnalysisResult;
+
       setResult(analysis);
+      setSelectedMonth(analysis.monthlyExpenses?.[0]?.month ?? "");
+      setBreakdownMode("month");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }
 
-  const chart = useMemo(() => {
-    if (!result?.monthlyExpenses?.length) return null;
-
-    // Your JSON seems to list months newest-first; reverse for a left-to-right timeline.
-    const ordered = [...result.monthlyExpenses].reverse();
-
-    const labels = ordered.map((m) => m.month);
-    const values = ordered.map((m) => parseEuroAmount(m.sum));
-
-    const colors = values.map(() => "rgba(13, 110, 253, 0.4)");
-
-    return {
-      data: {
-        labels,
-        datasets: [
-          {
-            label: "Expenses per month (€)",
-            data: values,
-            backgroundColor: colors,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        plugins: {
-          legend: { display: true },
-          title: {
-            display: true,
-            text: "Monthly expenses",
-          },
-          tooltip: {
-            callbacks: {
-              label: (ctx: any) => {
-                const v = ctx.parsed?.y ?? ctx.raw;
-                return `€ ${Number(v).toFixed(2)}`;
-              },
-            },
-          },
-        },
-        scales: {
-          y: {
-            ticks: {
-              callback: (value: any) => `€ ${value}`,
-            },
-          },
-        },
-      } as const,
-    };
-  }, [result]);
-
-  const availableMonths = useMemo(() => {
-    return result?.monthlyExpenses?.map((m) => m.month) ?? [];
-  }, [result]);
-
-  const pieChart = useMemo(() => {
-    if (!result?.monthlyExpenses?.length) return null;
-
-    // Helper: normalize categories object to { [category]: amount }
-    const extractMonthCategoryAmounts = (m: MonthlyExpense): Record<string, number> => {
-      const cats = m.categories ?? {};
-      const out: Record<string, number> = {};
-      for (const [catName, info] of Object.entries(cats)) {
-        out[catName] = Number(info.amount) || 0;
-      }
-      return out;
-    };
-
-    let categoryTotals: Record<string, number> = {};
-
-    if (breakdownMode === "month") {
-      const monthObj =
-          result.monthlyExpenses.find((m) => m.month === selectedMonth) ??
-          result.monthlyExpenses[0];
-
-      categoryTotals = extractMonthCategoryAmounts(monthObj);
-    } else {
-      // Year view (MVP): aggregate across all months present in analysis
-      for (const m of result.monthlyExpenses) {
-        const monthTotals = extractMonthCategoryAmounts(m);
-        for (const [cat, amount] of Object.entries(monthTotals)) {
-          categoryTotals[cat] = (categoryTotals[cat] ?? 0) + amount;
-        }
-      }
-    }
-
-    // Remove zero categories + sort by amount desc
-    const entries = Object.entries(categoryTotals)
-        .filter(([, v]) => v > 0)
-        .sort((a, b) => b[1] - a[1]);
-
-    if (!entries.length) return null;
-
-    const labels = entries.map(([k]) => k);
-    const values = entries.map(([, v]) => v);
-    const colors = makePieColors(values.length);
-
-    const title =
-        breakdownMode === "month"
-            ? `Category breakdown — ${selectedMonth || result.monthlyExpenses[0].month}`
-            : "Category breakdown — All months (year)";
-
-    return {
-      data: {
-        labels,
-        datasets: [
-          {
-            label: "€",
-            data: values,
-            backgroundColor: colors,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        plugins: {
-          legend: { display: true, position: "bottom" as const },
-          title: { display: true, text: title },
-          tooltip: {
-            callbacks: {
-              label: (ctx: any) => {
-                const label = ctx.label ?? "";
-                const value = Number(ctx.raw ?? 0);
-                return `${label}: € ${value.toFixed(2)}`;
-              },
-            },
-          },
-        },
-      } as const,
-    };
-  }, [result, breakdownMode, selectedMonth]);
-
-
   return (
-    <div style={{ padding: 32, maxWidth: 900, margin: "0 auto" }}>
-      <h1>Transaction Analyzer</h1>
-      <p style={{ marginTop: 8, color: "#666" }}>
-        Upload a CSV and view total expenses per month.
-      </p>
+      <div style={{ padding: 32, maxWidth: 900, margin: "0 auto" }}>
+        <h1>Transaction Analyzer</h1>
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".csv,text/csv"
-        onChange={onFileSelected}
-        style={{ display: "none" }}
-      />
+        <UploadButton loading={loading} onFile={analyzeFile} />
 
-      <button
-        onClick={() => fileInputRef.current?.click()}
-        disabled={loading}
-        style={{ padding: "10px 16px", cursor: loading ? "not-allowed" : "pointer" }}
-      >
-        {loading ? "Analyzing…" : "Upload file"}
-      </button>
+        {error && <pre style={{ marginTop: 20, color: "red", whiteSpace: "pre-wrap" }}>{error}</pre>}
 
-      {error && (
-        <pre style={{ marginTop: 20, color: "red", whiteSpace: "pre-wrap" }}>{error}</pre>
-      )}
-
-      {result && (
-        <div style={{ marginTop: 20 }}>
-          {fileName && (
-            <div style={{ marginBottom: 8, color: "#555" }}>
-              <strong>File:</strong> {fileName}
-            </div>
-          )}
-          {result.averageMonthExpenses && (
-            <div style={{ marginBottom: 10 }}>
-              <strong>Average month expenses:</strong> {result.averageMonthExpenses}
-            </div>
-          )}
-
-          {chart ? (
-            <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
-              <Bar data={chart.data} options={chart.options} />
-            </div>
-          ) : (
-            <div>No monthly data found in analysis result.</div>
-          )}
-
-          {/* Category breakdown section */}
-          <div style={{ marginTop: 24, borderTop: "1px solid #eee", paddingTop: 16 }}>
-            <h2 style={{ margin: "0 0 12px" }}>Category breakdown</h2>
-
-            <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-              <label>
-                View:&nbsp;
-                <select
-                    value={breakdownMode}
-                    onChange={(e) => setBreakdownMode(e.target.value as "month" | "year")}
-                >
-                  <option value="month">Month</option>
-                  <option value="year">Year</option>
-                </select>
-              </label>
-
-              {breakdownMode === "month" && (
-                  <label>
-                    Month:&nbsp;
-                    <select
-                        value={selectedMonth}
-                        onChange={(e) => setSelectedMonth(e.target.value)}
-                    >
-                      {availableMonths.map((m) => (
-                          <option key={m} value={m}>
-                            {m}
-                          </option>
-                      ))}
-                    </select>
-                  </label>
-              )}
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              {pieChart ? (
-                  <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
-                    <Pie data={pieChart.data} options={pieChart.options} />
+        {result && (
+            <div style={{ marginTop: 20 }}>
+              {fileName && (
+                  <div style={{ marginBottom: 8, color: "#555" }}>
+                    <strong>File:</strong> {fileName}
                   </div>
-              ) : (
-                  <div>No category data found for this selection.</div>
               )}
-            </div>
-          </div>
 
+              <MonthlyBarChart monthlyExpenses={result.monthlyExpenses} />
 
-          {/* Keep for debugging while MVP */}
-          <details style={{ marginTop: 16 }}>
-            <summary>Show raw JSON</summary>
-            <pre style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>
+              <CategoryBreakdown
+                  monthlyExpenses={result.monthlyExpenses}
+                  breakdownMode={breakdownMode}
+                  selectedMonth={selectedMonth}
+                  setBreakdownMode={setBreakdownMode}
+                  setSelectedMonth={setSelectedMonth}
+              />
+
+              <details style={{ marginTop: 16 }}>
+                <summary>Show raw JSON</summary>
+                <pre style={{ marginTop: 10, whiteSpace: "pre-wrap" }}>
               {JSON.stringify(result, null, 2)}
             </pre>
-          </details>
-        </div>
-      )}
-    </div>
+              </details>
+            </div>
+        )}
+      </div>
   );
 }
