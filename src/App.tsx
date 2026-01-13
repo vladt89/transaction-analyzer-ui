@@ -139,6 +139,19 @@ function buildCategoryPieChart(args: {
       plugins: {
         legend: { display: true, position: "bottom" as const },
         title: { display: true, text: title },
+        tooltip: {
+          callbacks: {
+            label: (ctx: any) => {
+              const label = ctx.label ?? "";
+              const value = Number(ctx.raw ?? 0);
+              const data = ctx.dataset.data as number[];
+              const total = data.reduce((a, b) => a + b, 0);
+              const percent = total > 0 ? (value / total) * 100 : 0;
+
+              return `${label}: € ${value.toFixed(2)} (${percent.toFixed(1)}%)`;
+            },
+          },
+        },
       },
     } as const,
   };
@@ -305,6 +318,11 @@ export default function App() {
                   </div>
               )}
 
+              {result.averageMonthExpenses && (
+                <div style={{ marginTop: 8, marginBottom: 8, color: "#555" }}>
+                  <strong>Average monthly expenses:</strong> {result.averageMonthExpenses}
+                </div>
+              )}
               <MonthlyBarChart monthlyExpenses={result.monthlyExpenses} />
 
               <CategoryBreakdown
