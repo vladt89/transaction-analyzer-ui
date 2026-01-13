@@ -7,14 +7,26 @@ import {
   CategoryScale,
   LinearScale,
   BarElement,
+  LineElement,
+  PointElement,
   ArcElement,
   Title,
   Tooltip,
   Legend,
 } from "chart.js";
-import { Bar, Pie } from "react-chartjs-2";
+import { Chart, Pie } from "react-chartjs-2";
 
-ChartJS.register(CategoryScale, LinearScale, BarElement, ArcElement, Title, Tooltip, Legend);
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  LineElement,
+  PointElement,
+  ArcElement,
+  Title,
+  Tooltip,
+  Legend
+);
 
 /**
  * Single-file MVP structure:
@@ -58,21 +70,51 @@ function makePieColors(n: number): string[] {
 }
 
 /** Build the Chart.js config for the monthly expenses bar chart. */
-function buildMonthlyBarChart(monthlyExpenses: MonthlyExpense[]) {
+function buildMonthlyBarChart(monthlyExpenses: MonthlyExpense[], avgOverride?: number) {
   const ordered = [...monthlyExpenses].reverse();
   const labels = ordered.map((m) => m.month);
   const values = ordered.map((m) => parseEuroAmount(m.sum));
   const colors = values.map(() => "rgba(13, 110, 253, 0.4)");
 
+  const avg =
+    avgOverride ?? (values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0);
+  const avgSeries = labels.map(() => avg);
+
   return {
     data: {
       labels,
-      datasets: [{ label: "Expenses per month (€)", data: values, backgroundColor: colors }],
+      datasets: [
+        {
+          type: "bar" as const,
+          label: "Expenses per month (€)",
+          data: values,
+          backgroundColor: colors,
+        },
+        {
+          type: "line" as const,
+          label: "Average",
+          data: avgSeries,
+          borderColor: "rgba(255, 159, 64, 1)",
+          backgroundColor: "rgba(0, 0, 0, 0)",
+          borderDash: [6, 6],
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0,
+          fill: false,
+          spanGaps: true,
+          pointStyle: "line",
+        },
+      ],
     },
     options: {
       responsive: true,
       plugins: {
-        legend: { display: true },
+        legend: {
+          display: true,
+          labels: {
+            usePointStyle: true,
+          },
+        },
         title: { display: true, text: "Monthly expenses" },
       },
     } as const,
@@ -193,11 +235,17 @@ function UploadButton(props: Readonly<{
 }
 
 /** Presentational wrapper for the monthly expenses bar chart. */
-function MonthlyBarChart({ monthlyExpenses }: Readonly<{ monthlyExpenses: MonthlyExpense[] }>) {
-  const chart = useMemo(() => buildMonthlyBarChart(monthlyExpenses), [monthlyExpenses]);
+function MonthlyBarChart(
+  { monthlyExpenses, averageMonthExpenses }: Readonly<{ monthlyExpenses: MonthlyExpense[]; averageMonthExpenses?: string }>
+) {
+  const avgValue = averageMonthExpenses ? parseEuroAmount(averageMonthExpenses) : undefined;
+  const chart = useMemo(
+    () => buildMonthlyBarChart(monthlyExpenses, avgValue),
+    [monthlyExpenses, avgValue]
+  );
   return (
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, marginTop: 12 }}>
-        <Bar data={chart.data} options={chart.options} />
+        <Chart type="bar" data={chart.data} options={chart.options} />
       </div>
   );
 }
@@ -323,7 +371,10 @@ export default function App() {
                   <strong>Average monthly expenses:</strong> {result.averageMonthExpenses}
                 </div>
               )}
-              <MonthlyBarChart monthlyExpenses={result.monthlyExpenses} />
+              <MonthlyBarChart
+                monthlyExpenses={result.monthlyExpenses}
+                averageMonthExpenses={result.averageMonthExpenses}
+              />
 
               <CategoryBreakdown
                   monthlyExpenses={result.monthlyExpenses}
