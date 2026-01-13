@@ -199,6 +199,90 @@ function buildCategoryPieChart(args: {
   };
 }
 
+/**
+ * Build the Chart.js config for category trends over time.
+ * By default shows top N categories by total spend across all months.
+ */
+function buildCategoryTrendsChart(monthlyExpenses: MonthlyExpense[], topN = 6) {
+  const ordered = [...monthlyExpenses].reverse();
+  const labels = ordered.map((m) => m.month);
+
+  // Compute totals per category across all months
+  const totals: Record<string, number> = {};
+  const perMonth: Record<string, number[]> = {};
+
+  for (const m of ordered) {
+    const monthTotals = extractMonthCategoryAmounts(m);
+    for (const [cat, amount] of Object.entries(monthTotals)) {
+      totals[cat] = (totals[cat] ?? 0) + amount;
+    }
+  }
+
+  const topCats = Object.entries(totals)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topN)
+    .map(([cat]) => cat);
+
+  // Initialize series arrays
+  for (const cat of topCats) {
+    perMonth[cat] = new Array(labels.length).fill(0);
+  }
+  perMonth["Other"] = new Array(labels.length).fill(0);
+
+  // Fill series
+  ordered.forEach((m, idx) => {
+    const monthTotals = extractMonthCategoryAmounts(m);
+    for (const [cat, amount] of Object.entries(monthTotals)) {
+      if (topCats.includes(cat)) {
+        perMonth[cat][idx] += amount;
+      } else {
+        perMonth["Other"][idx] += amount;
+      }
+    }
+  });
+
+  const seriesNames = [...topCats, "Other"].filter((n) => perMonth[n].some((v) => v > 0));
+  const colors = makePieColors(seriesNames.length);
+
+  return {
+    data: {
+      labels,
+      datasets: seriesNames.map((name, i) => ({
+        type: "line" as const,
+        label: name,
+        data: perMonth[name],
+        borderColor: colors[i],
+        backgroundColor: "rgba(0,0,0,0)",
+        pointRadius: 2,
+        tension: 0.2,
+      })),
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { display: true, position: "bottom" as const },
+        title: { display: true, text: "Category trends (top categories)" },
+        tooltip: {
+          callbacks: {
+            label: (ctx: any) => {
+              const label = ctx.dataset?.label ?? "";
+              const value = Number(ctx.raw ?? 0);
+              return `${label}: € ${value.toFixed(2)}`;
+            },
+          },
+        },
+      },
+      scales: {
+        y: {
+          ticks: {
+            callback: (value: any) => `€ ${value}`,
+          },
+        },
+      },
+    } as const,
+  };
+}
+
 // -------------------- Small components (same file) --------------------
 /**
  * Upload control (button + hidden file input).
@@ -314,6 +398,23 @@ function CategoryBreakdown(props: Readonly<{
   );
 }
 
+/** Line chart showing how category spending changes over time. */
+function CategoryTrends({ monthlyExpenses }: Readonly<{ monthlyExpenses: MonthlyExpense[] }>) {
+  const chart = useMemo(() => buildCategoryTrendsChart(monthlyExpenses, 6), [monthlyExpenses]);
+
+  return (
+    <div style={{ marginTop: 24, borderTop: "1px solid #eee", paddingTop: 16 }}>
+      <h2 style={{ margin: "0 0 12px" }}>Category trends</h2>
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
+        <Chart type="line" data={chart.data} options={chart.options} />
+      </div>
+      <div style={{ marginTop: 8, color: "#666", fontSize: 12 }}>
+        Showing top 6 categories by total spend across the selected period (others grouped as "Other").
+      </div>
+    </div>
+  );
+}
+
 // -------------------- App (state + orchestration) --------------------
 /**
  * Page-level component: owns state and orchestrates file upload -> analysis -> charts.
@@ -383,6 +484,8 @@ export default function App() {
                   setBreakdownMode={setBreakdownMode}
                   setSelectedMonth={setSelectedMonth}
               />
+
+              <CategoryTrends monthlyExpenses={result.monthlyExpenses} />
 
               <details style={{ marginTop: 16 }}>
                 <summary>Show raw JSON</summary>
