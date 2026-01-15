@@ -283,6 +283,181 @@ function buildCategoryTrendsChart(monthlyExpenses: MonthlyExpense[], topN = 6) {
   };
 }
 
+type RecurringTransaction = {
+  name: string;
+  category: string;
+  count: number;
+  avgAmount: number;
+};
+
+type IdenticalRecurringTransaction = {
+  name: string;
+  category: string;
+  amount: number;
+  count: number;
+};
+
+/**
+ * Parse analyzer-generated transaction summary lines like:
+ * "spent 28.33 euros in Paytrail Oyj DNA Oyj Mobiilipa on Tue Dec 09 2025"
+ */
+function parseSummaryLine(line: string): { name: string; amount: number } | null {
+  const amountMatch = /spent\s+(-?\d+(?:\.\d+)?)\s+euros?/i.exec(line);
+  if (!amountMatch) return null;
+  const amount = Number(amountMatch[1]);
+
+  // Prefer extracting merchant between " in " and " on ". If " on " is missing, take the rest.
+  const inIdx = line.toLowerCase().indexOf(" in ");
+  if (inIdx === -1) return null;
+  const afterIn = line.slice(inIdx + 4);
+  const onIdx = afterIn.toLowerCase().lastIndexOf(" on ");
+  const name = (onIdx === -1 ? afterIn : afterIn.slice(0, onIdx)).trim();
+  if (!name) return null;
+
+  return { name, amount };
+}
+
+/** Compute total spend per category across all months (used for consistent color mapping). */
+function computeCategoryTotals(monthlyExpenses: MonthlyExpense[]): Record<string, number> {
+  const totals: Record<string, number> = {};
+  for (const m of monthlyExpenses) {
+    const cats = m.categories ?? {};
+    for (const [catName, info] of Object.entries(cats)) {
+      totals[catName] = (totals[catName] ?? 0) + (Number(info.amount) || 0);
+    }
+  }
+  return totals;
+}
+
+/** Build a stable category color map (sorted by total spend desc, then name). */
+function buildCategoryColorMap(monthlyExpenses: MonthlyExpense[]): Record<string, string> {
+  const totals = computeCategoryTotals(monthlyExpenses);
+  const names = Object.keys(totals).sort((a, b) => {
+    const diff = (totals[b] ?? 0) - (totals[a] ?? 0);
+    return diff !== 0 ? diff : a.localeCompare(b);
+  });
+  const colors = makePieColors(names.length || 1);
+  const map: Record<string, string> = {};
+  names.forEach((name, idx) => {
+    map[name] = colors[idx];
+  });
+  return map;
+}
+
+/** Compute top recurring transactions by merchant/name across all months/categories. */
+function computeTopRecurringTransactions(
+  monthlyExpenses: MonthlyExpense[],
+  topN = 10
+): RecurringTransaction[] {
+  const stats: Record<
+    string,
+    { count: number; sum: number; categoryCounts: Record<string, number> }
+  > = {};
+
+  for (const m of monthlyExpenses) {
+    const categories = m.categories ?? {};
+    for (const [categoryName, cat] of Object.entries(categories)) {
+      const tx = cat.transactions ?? {};
+      for (const [key, value] of Object.entries(tx)) {
+        // Skip synthesized rows
+        if (key === "on average") continue;
+        if (typeof value !== "string") continue;
+
+        const parsed = parseSummaryLine(value);
+        if (!parsed) continue;
+
+        const normalizedName = parsed.name.replace(/\s+/g, " ").trim();
+        const current = stats[normalizedName] ?? {
+          count: 0,
+          sum: 0,
+          categoryCounts: {},
+        };
+
+        current.count += 1;
+        current.sum += parsed.amount;
+        current.categoryCounts[categoryName] = (current.categoryCounts[categoryName] ?? 0) + 1;
+        stats[normalizedName] = current;
+      }
+    }
+  }
+
+  return Object.entries(stats)
+    .map(([name, s]) => {
+      const bestCategory = Object.entries(s.categoryCounts)
+        .sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+
+      return {
+        name,
+        category: bestCategory,
+        count: s.count,
+        avgAmount: s.count ? s.sum / s.count : 0,
+      };
+    })
+    .sort((a, b) => (b.count - a.count) || (b.avgAmount - a.avgAmount))
+    .slice(0, topN);
+}
+
+/**
+ * Compute transactions that repeat identically: same merchant/name AND same amount.
+ * Useful for subscriptions (e.g., Netflix €12.99 every month).
+ */
+function computeIdenticalRecurringTransactions(
+  monthlyExpenses: MonthlyExpense[],
+  topN = 10
+): IdenticalRecurringTransaction[] {
+  const stats: Record<
+    string,
+    { name: string; amount: number; count: number; categoryCounts: Record<string, number> }
+  > = {};
+
+  for (const m of monthlyExpenses) {
+    const categories = m.categories ?? {};
+    for (const [categoryName, cat] of Object.entries(categories)) {
+      const tx = cat.transactions ?? {};
+      for (const [key, value] of Object.entries(tx)) {
+        // Skip synthesized rows
+        if (key === "on average") continue;
+        if (typeof value !== "string") continue;
+
+        const parsed = parseSummaryLine(value);
+        if (!parsed) continue;
+
+        const normalizedName = parsed.name.replace(/\s+/g, " ").trim();
+
+        // Amount normalization: keep 2 decimals (EUR cents)
+        const amount = Math.round(parsed.amount * 100) / 100;
+
+        const groupKey = `${normalizedName}__${amount.toFixed(2)}`;
+        const current = stats[groupKey] ?? {
+          name: normalizedName,
+          amount,
+          count: 0,
+          categoryCounts: {},
+        };
+        current.count += 1;
+        current.categoryCounts[categoryName] = (current.categoryCounts[categoryName] ?? 0) + 1;
+        stats[groupKey] = current;
+      }
+    }
+  }
+
+  return Object.values(stats)
+    // Only keep truly recurring ones (2+ occurrences)
+    .filter((r) => r.count >= 2)
+    .map((r) => {
+      const bestCategory = Object.entries(r.categoryCounts)
+        .sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+      return {
+        name: r.name,
+        category: bestCategory,
+        amount: r.amount,
+        count: r.count,
+      };
+    })
+    .sort((a, b) => (b.count - a.count) || (b.amount - a.amount))
+    .slice(0, topN);
+}
+
 // -------------------- Small components (same file) --------------------
 /**
  * Upload control (button + hidden file input).
@@ -415,6 +590,120 @@ function CategoryTrends({ monthlyExpenses }: Readonly<{ monthlyExpenses: Monthly
   );
 }
 
+/** Table showing the most recurring transactions (by merchant/name) across the analyzed period. */
+function TopRecurringTransactions({ monthlyExpenses }: Readonly<{ monthlyExpenses: MonthlyExpense[] }>) {
+  const rows = useMemo(() => computeTopRecurringTransactions(monthlyExpenses, 10), [monthlyExpenses]);
+  const categoryColors = useMemo(() => buildCategoryColorMap(monthlyExpenses), [monthlyExpenses]);
+
+  return (
+    <div style={{ marginTop: 24, borderTop: "1px solid #eee", paddingTop: 16 }}>
+      <h2 style={{ margin: "0 0 12px" }}>Top recurring transactions</h2>
+
+      {rows.length ? (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px" }}>Name</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px" }}>Category</th>
+                <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>Avg amount</th>
+                <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.name}>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3" }}>{r.name}</td>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3" }}>
+                    <span
+                      style={{
+                        color: categoryColors[r.category] ?? "#555",
+                        fontWeight: 600,
+                      }}
+                    >
+                      {r.category || "—"}
+                    </span>
+                  </td>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>
+                    € {r.avgAmount.toFixed(2)}
+                  </td>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>{r.count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div>No recurring transactions found in the current analysis output.</div>
+      )}
+
+      <div style={{ marginTop: 8, color: "#666", fontSize: 12 }}>
+        Based on transaction summary lines emitted by the analyzer per category/month. (MVP approximation.)
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Table showing "identical" recurring payments: same merchant/name AND same amount.
+ * This is a good proxy for subscriptions.
+ */
+function IdenticalRecurringTransactions({ monthlyExpenses }: Readonly<{ monthlyExpenses: MonthlyExpense[] }>) {
+  const rows = useMemo(
+    () => computeIdenticalRecurringTransactions(monthlyExpenses, 10),
+    [monthlyExpenses]
+  );
+  const categoryColors = useMemo(() => buildCategoryColorMap(monthlyExpenses), [monthlyExpenses]);
+
+  return (
+    <div style={{ marginTop: 24, borderTop: "1px solid #eee", paddingTop: 16 }}>
+      <h2 style={{ margin: "0 0 12px" }}>Identical recurring payments (subscriptions)</h2>
+
+      {rows.length ? (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px" }}>Name</th>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px" }}>Category</th>
+                <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>Amount</th>
+                <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>Count</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={`${r.name}__${r.amount.toFixed(2)}`}>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3" }}>{r.name}</td>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3" }}>
+                    <span
+                      style={{
+                        color: categoryColors[r.category] ?? "#555",
+                        fontWeight: 600,
+                      }}
+                    >
+                      {r.category || "—"}
+                    </span>
+                  </td>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>
+                    € {r.amount.toFixed(2)}
+                  </td>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>{r.count}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div>No identical recurring payments found (need 2+ occurrences).</div>
+      )}
+
+      <div style={{ marginTop: 8, color: "#666", fontSize: 12 }}>
+        Grouped by merchant/name + exact amount (rounded to cents). (MVP approximation.)
+      </div>
+    </div>
+  );
+}
+
 // -------------------- App (state + orchestration) --------------------
 /**
  * Page-level component: owns state and orchestrates file upload -> analysis -> charts.
@@ -486,6 +775,9 @@ export default function App() {
               />
 
               <CategoryTrends monthlyExpenses={result.monthlyExpenses} />
+
+              <TopRecurringTransactions monthlyExpenses={result.monthlyExpenses} />
+              <IdenticalRecurringTransactions monthlyExpenses={result.monthlyExpenses} />
 
               <details style={{ marginTop: 16 }}>
                 <summary>Show raw JSON</summary>
