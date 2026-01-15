@@ -288,6 +288,7 @@ type RecurringTransaction = {
   category: string;
   count: number;
   avgAmount: number;
+  totalAmount: number;
 };
 
 type IdenticalRecurringTransaction = {
@@ -295,6 +296,7 @@ type IdenticalRecurringTransaction = {
   category: string;
   amount: number;
   count: number;
+  totalAmount: number;
 };
 
 /**
@@ -391,6 +393,7 @@ function computeTopRecurringTransactions(
         category: bestCategory,
         count: s.count,
         avgAmount: s.count ? s.sum / s.count : 0,
+        totalAmount: s.sum,
       };
     })
     .sort((a, b) => (b.count - a.count) || (b.avgAmount - a.avgAmount))
@@ -452,6 +455,7 @@ function computeIdenticalRecurringTransactions(
         category: bestCategory,
         amount: r.amount,
         count: r.count,
+        totalAmount: r.amount * r.count,
       };
     })
     .sort((a, b) => (b.count - a.count) || (b.amount - a.amount))
@@ -592,22 +596,96 @@ function CategoryTrends({ monthlyExpenses }: Readonly<{ monthlyExpenses: Monthly
 
 /** Table showing the most recurring transactions (by merchant/name) across the analyzed period. */
 function TopRecurringTransactions({ monthlyExpenses }: Readonly<{ monthlyExpenses: MonthlyExpense[] }>) {
-  const rows = useMemo(() => computeTopRecurringTransactions(monthlyExpenses, 10), [monthlyExpenses]);
+  const [limit, setLimit] = useState<number>(10);
+  const rawRows = useMemo(
+    () => computeTopRecurringTransactions(monthlyExpenses, limit),
+    [monthlyExpenses, limit]
+  );
+  const [sortKey, setSortKey] = useState<"name" | "category" | "avgAmount" | "totalAmount" | "count">("count");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const rows = useMemo(() => {
+    const sorted = [...rawRows];
+    sorted.sort((a, b) => {
+      const dir = sortDir === "asc" ? 1 : -1;
+      switch (sortKey) {
+        case "name":
+          return dir * a.name.localeCompare(b.name);
+        case "category":
+          return dir * (a.category || "").localeCompare(b.category || "");
+        case "avgAmount":
+          return dir * (a.avgAmount - b.avgAmount);
+        case "totalAmount":
+          return dir * (a.totalAmount - b.totalAmount);
+        case "count":
+        default:
+          return dir * (a.count - b.count);
+      }
+    });
+    return sorted;
+  }, [rawRows, sortKey, sortDir]);
+
+  function toggleSort(nextKey: typeof sortKey) {
+    if (nextKey === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(nextKey);
+      setSortDir(nextKey === "name" || nextKey === "category" ? "asc" : "desc");
+    }
+  }
+
   const categoryColors = useMemo(() => buildCategoryColorMap(monthlyExpenses), [monthlyExpenses]);
 
   return (
     <div style={{ marginTop: 24, borderTop: "1px solid #eee", paddingTop: 16 }}>
       <h2 style={{ margin: "0 0 12px" }}>Top recurring transactions</h2>
+      <div style={{ marginBottom: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <label style={{ color: "#555" }}>
+          Show:{" "}
+          <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
+            <option value={5}>5</option>
+            <option value={10}>10</option>
+            <option value={20}>20</option>
+            <option value={50}>50</option>
+          </select>
+        </label>
+      </div>
 
       {rows.length ? (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px" }}>Name</th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px" }}>Category</th>
-                <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>Avg amount</th>
-                <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>Count</th>
+                <th
+                  onClick={() => toggleSort("name")}
+                  style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px", cursor: "pointer" }}
+                >
+                  Name
+                </th>
+                <th
+                  onClick={() => toggleSort("category")}
+                  style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px", cursor: "pointer" }}
+                >
+                  Category
+                </th>
+                <th
+                  onClick={() => toggleSort("avgAmount")}
+                  style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap", cursor: "pointer" }}
+                >
+                  Avg amount
+                </th>
+                <th
+                  onClick={() => toggleSort("count")}
+                  style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap", cursor: "pointer" }}
+                >
+                  Count
+                </th>
+                <th
+                  onClick={() => toggleSort("totalAmount")}
+                  style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap", cursor: "pointer" }}
+                >
+                  Total
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -628,6 +706,9 @@ function TopRecurringTransactions({ monthlyExpenses }: Readonly<{ monthlyExpense
                     € {r.avgAmount.toFixed(2)}
                   </td>
                   <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>{r.count}</td>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>
+                    € {r.totalAmount.toFixed(2)}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -649,25 +730,96 @@ function TopRecurringTransactions({ monthlyExpenses }: Readonly<{ monthlyExpense
  * This is a good proxy for subscriptions.
  */
 function IdenticalRecurringTransactions({ monthlyExpenses }: Readonly<{ monthlyExpenses: MonthlyExpense[] }>) {
-  const rows = useMemo(
-    () => computeIdenticalRecurringTransactions(monthlyExpenses, 10),
-    [monthlyExpenses]
+  const [limit, setLimit] = useState<number>(10);
+  const rawRows = useMemo(
+    () => computeIdenticalRecurringTransactions(monthlyExpenses, limit),
+    [monthlyExpenses, limit]
   );
+  const [sortKey, setSortKey] = useState<"name" | "category" | "amount" | "totalAmount" | "count">("count");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  const rows = useMemo(() => {
+    const sorted = [...rawRows];
+    sorted.sort((a, b) => {
+      const dir = sortDir === "asc" ? 1 : -1;
+      switch (sortKey) {
+        case "name":
+          return dir * a.name.localeCompare(b.name);
+        case "category":
+          return dir * (a.category || "").localeCompare(b.category || "");
+        case "amount":
+          return dir * (a.amount - b.amount);
+        case "totalAmount":
+          return dir * (a.totalAmount - b.totalAmount);
+        case "count":
+        default:
+          return dir * (a.count - b.count);
+      }
+    });
+    return sorted;
+  }, [rawRows, sortKey, sortDir]);
+
+  function toggleSort(nextKey: typeof sortKey) {
+    if (nextKey === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(nextKey);
+      setSortDir(nextKey === "name" || nextKey === "category" ? "asc" : "desc");
+    }
+  }
+
   const categoryColors = useMemo(() => buildCategoryColorMap(monthlyExpenses), [monthlyExpenses]);
 
   return (
     <div style={{ marginTop: 24, borderTop: "1px solid #eee", paddingTop: 16 }}>
       <h2 style={{ margin: "0 0 12px" }}>Identical recurring payments (subscriptions)</h2>
+      <div style={{ marginBottom: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+        <label style={{ color: "#555" }}>
+          Show:{" "}
+          <select value={limit} onChange={(e) => setLimit(Number(e.target.value))}>
+            <option value={5}>5</option>
+            <option value={10}>10</option>
+            <option value={20}>20</option>
+            <option value={50}>50</option>
+          </select>
+        </label>
+      </div>
 
       {rows.length ? (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px" }}>Name</th>
-                <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px" }}>Category</th>
-                <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>Amount</th>
-                <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>Count</th>
+                <th
+                  onClick={() => toggleSort("name")}
+                  style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px", cursor: "pointer" }}
+                >
+                  Name
+                </th>
+                <th
+                  onClick={() => toggleSort("category")}
+                  style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px", cursor: "pointer" }}
+                >
+                  Category
+                </th>
+                <th
+                  onClick={() => toggleSort("amount")}
+                  style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap", cursor: "pointer" }}
+                >
+                  Amount
+                </th>
+                <th
+                  onClick={() => toggleSort("count")}
+                  style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap", cursor: "pointer" }}
+                >
+                  Count
+                </th>
+                <th
+                  onClick={() => toggleSort("totalAmount")}
+                  style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap", cursor: "pointer" }}
+                >
+                  Total
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -688,6 +840,9 @@ function IdenticalRecurringTransactions({ monthlyExpenses }: Readonly<{ monthlyE
                     € {r.amount.toFixed(2)}
                   </td>
                   <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>{r.count}</td>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>
+                    € {r.totalAmount.toFixed(2)}
+                  </td>
                 </tr>
               ))}
             </tbody>
