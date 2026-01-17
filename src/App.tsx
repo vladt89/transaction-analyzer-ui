@@ -64,6 +64,17 @@ function parseEuroAmount(sum: string): number {
   return match ? Number(match[0]) : 0;
 }
 
+/** Format sortable month keys like `2025-04` into a human label like `April 2025`. */
+function formatMonthLabel(monthKey: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(monthKey.trim());
+  if (!m) return monthKey;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const dt = new Date(year, month - 1, 1);
+  // Use the user's locale by default.
+  return new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(dt);
+}
+
 /** Generate a distinct color per pie slice using HSL. */
 function makePieColors(n: number): string[] {
   return Array.from({ length: n }, (_, i) => `hsl(${Math.round((360 * i) / n)}, 70%, 60%)`);
@@ -71,8 +82,8 @@ function makePieColors(n: number): string[] {
 
 /** Build the Chart.js config for the monthly expenses bar chart. */
 function buildMonthlyBarChart(monthlyExpenses: MonthlyExpense[], avgOverride?: number) {
-  const ordered = [...monthlyExpenses].reverse();
-  const labels = ordered.map((m) => m.month);
+  const ordered = [...monthlyExpenses].sort((a, b) => a.month.localeCompare(b.month));
+  const labels = ordered.map((m) => formatMonthLabel(m.month));
   const values = ordered.map((m) => parseEuroAmount(m.sum));
   const colors = values.map(() => "rgba(13, 110, 253, 0.4)");
 
@@ -168,7 +179,7 @@ function buildCategoryPieChart(args: {
 
   const title =
       breakdownMode === "month"
-          ? `Category breakdown — ${selectedMonth || monthlyExpenses[0].month}`
+          ? `Category breakdown — ${formatMonthLabel(selectedMonth || monthlyExpenses[0].month)}`
           : "Category breakdown — All months (year)";
 
   return {
@@ -245,8 +256,8 @@ function computeMonthCategoryPercentages(monthlyExpenses: MonthlyExpense[], sele
  * By default shows top N categories by total spend across all months.
  */
 function buildCategoryTrendsChart(monthlyExpenses: MonthlyExpense[], topN = 6) {
-  const ordered = [...monthlyExpenses].reverse();
-  const labels = ordered.map((m) => m.month);
+  const ordered = [...monthlyExpenses].sort((a, b) => a.month.localeCompare(b.month));
+  const labels = ordered.map((m) => formatMonthLabel(m.month));
 
   // Compute totals per category across all months
   const totals: Record<string, number> = {};
@@ -506,11 +517,11 @@ function computeIdenticalRecurringTransactions(
 // -------------------- Small components (same file) --------------------
 /**
  * Upload control (button + hidden file input).
- * Calls `onFile` with the selected CSV file.
+ * Calls `onFiles` with the selected CSV files.
  */
 function UploadButton(props: Readonly<{
   loading: boolean;
-  onFile: (file: File) => void;
+  onFiles: (files: File[]) => void;
 }>) {
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -519,10 +530,11 @@ function UploadButton(props: Readonly<{
         <input
             ref={inputRef}
             type="file"
+            multiple
             accept=".csv,text/csv"
             onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) props.onFile(f);
+              const files = Array.from(e.target.files ?? []);
+              if (files.length) props.onFiles(files);
               if (inputRef.current) inputRef.current.value = "";
             }}
             style={{ display: "none" }}
@@ -532,7 +544,7 @@ function UploadButton(props: Readonly<{
             disabled={props.loading}
             style={{ padding: "10px 16px", cursor: props.loading ? "not-allowed" : "pointer" }}
         >
-          {props.loading ? "Analyzing…" : "Upload file"}
+          {props.loading ? "Analyzing…" : "Upload files"}
         </button>
       </>
   );
@@ -565,7 +577,10 @@ function CategoryBreakdown(props: Readonly<{
   setBreakdownMode: (v: "month" | "year") => void;
   setSelectedMonth: (v: string) => void;
 }>) {
-  const months = useMemo(() => props.monthlyExpenses.map((m) => m.month), [props.monthlyExpenses]);
+  const months = useMemo(
+    () => [...props.monthlyExpenses].map((m) => m.month).sort((a, b) => a.localeCompare(b)),
+    [props.monthlyExpenses]
+  );
 
   const pie = useMemo(
       () =>
@@ -610,7 +625,7 @@ function CategoryBreakdown(props: Readonly<{
                 Month:{" "}
                 <select value={props.selectedMonth} onChange={(e) => props.setSelectedMonth(e.target.value)}>
                   {months.map((m) => (
-                      <option key={m} value={m}>{m}</option>
+                      <option key={m} value={m}>{formatMonthLabel(m)}</option>
                   ))}
                 </select>
               </label>
@@ -631,7 +646,7 @@ function CategoryBreakdown(props: Readonly<{
               <div style={{ color: "#555", fontWeight: 600, marginBottom: 6 }}>
                 {props.breakdownMode === "year"
                   ? "Percentages for the whole period"
-                  : `Percentages for ${props.selectedMonth || props.monthlyExpenses[0]?.month}`}
+                  : `Percentages for ${formatMonthLabel(props.selectedMonth || props.monthlyExpenses[0]?.month || "")}`}
               </div>
               <div style={{ overflowX: "auto" }}>
                 <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -958,6 +973,78 @@ function IdenticalRecurringTransactions({ monthlyExpenses }: Readonly<{ monthlyE
 
 // -------------------- App (state + orchestration) --------------------
 /**
+ * Merge multiple analysis results into one combined view.
+ * MVP approach: sums monthly/category amounts and recomputes percentages.
+ */
+function mergeAnalysisResults(results: AnalysisResult[]): AnalysisResult {
+  const byMonth: Record<string, MonthlyExpense> = {};
+
+  for (const res of results) {
+    for (const m of res.monthlyExpenses ?? []) {
+      const existing = byMonth[m.month] ?? { month: m.month, sum: "0 euros", categories: {} };
+
+      // Sum month totals
+      const monthSum = parseEuroAmount(existing.sum) + parseEuroAmount(m.sum);
+      existing.sum = `${monthSum} euros`;
+
+      // Merge categories
+      const srcCats = m.categories ?? {};
+      const dstCats = existing.categories ?? {};
+
+      for (const [catName, catInfo] of Object.entries(srcCats)) {
+        const prev = dstCats[catName] ?? {
+          amount: 0,
+          percentage: 0,
+          transactions: {} as Record<string, string>,
+        };
+
+        prev.amount = (Number(prev.amount) || 0) + (Number(catInfo.amount) || 0);
+
+        // Merge transactions maps (best-effort)
+        const prevTx = prev.transactions ?? {};
+        const srcTx = catInfo.transactions ?? {};
+        for (const [k, v] of Object.entries(srcTx)) {
+          if (prevTx[k] === undefined) {
+            prevTx[k] = v;
+          } else {
+            let i = 2;
+            while (prevTx[`${k} (${i})`] !== undefined) i += 1;
+            prevTx[`${k} (${i})`] = v;
+          }
+        }
+        prev.transactions = prevTx;
+
+        dstCats[catName] = prev;
+      }
+
+      existing.categories = dstCats;
+      byMonth[m.month] = existing;
+    }
+  }
+
+  const mergedMonths = Object.values(byMonth).sort((a, b) => a.month.localeCompare(b.month));
+
+  // Recompute category percentages per month
+  for (const m of mergedMonths) {
+    const cats = m.categories ?? {};
+    const total = Object.values(cats).reduce((acc, c) => acc + (Number(c.amount) || 0), 0);
+    for (const c of Object.values(cats)) {
+      const amt = Number(c.amount) || 0;
+      c.percentage = total > 0 ? (amt / total) * 100 : 0;
+    }
+  }
+
+  // Average monthly expenses across merged months
+  const monthValues = mergedMonths.map((m) => parseEuroAmount(m.sum));
+  const avg = monthValues.length ? monthValues.reduce((a, b) => a + b, 0) / monthValues.length : 0;
+
+  return {
+    averageMonthExpenses: `${avg} euros`,
+    monthlyExpenses: mergedMonths,
+  };
+}
+
+/**
  * Page-level component: owns state and orchestrates file upload -> analysis -> charts.
  */
 export default function App() {
@@ -966,25 +1053,37 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
+  const [fileNames, setFileNames] = useState<string[]>([]);
 
   const [breakdownMode, setBreakdownMode] = useState<"month" | "year">("month");
   const [selectedMonth, setSelectedMonth] = useState<string>("");
 
-  async function analyzeFile(file: File) {
+  async function analyzeFiles(files: File[]) {
+    const limited = files.slice(0, 5);
+
     setLoading(true);
     setError(null);
     setResult(null);
-    setFileName(file.name);
+    setFileNames(limited.map((f) => f.name));
 
     try {
-      const csvText = await file.text();
-      const bank = detectBank(file.name);
-      const analysis = (await analyzer.analyzeCsvContent(csvText, bank)) as AnalysisResult;
+      const analyses: AnalysisResult[] = [];
 
-      setResult(analysis);
-      setSelectedMonth(analysis.monthlyExpenses?.[0]?.month ?? "");
+      for (const file of limited) {
+        const csvText = await file.text();
+        const bank = detectBank(file.name);
+        const analysis = (await analyzer.analyzeCsvContent(csvText, bank)) as AnalysisResult;
+        analyses.push(analysis);
+      }
+
+      const merged = mergeAnalysisResults(analyses);
+      setResult(merged);
+      setSelectedMonth(merged.monthlyExpenses?.[0]?.month ?? "");
       setBreakdownMode("month");
+
+      if (files.length > 5) {
+        setError(`You selected ${files.length} files. Only the first 5 were analyzed in this MVP.`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -996,16 +1095,16 @@ export default function App() {
       <div style={{ padding: 32, maxWidth: 900, margin: "0 auto" }}>
         <h1>Transaction Analyzer</h1>
 
-        <UploadButton loading={loading} onFile={analyzeFile} />
+        <UploadButton loading={loading} onFiles={analyzeFiles} />
 
         {error && <pre style={{ marginTop: 20, color: "red", whiteSpace: "pre-wrap" }}>{error}</pre>}
 
         {result && (
             <div style={{ marginTop: 20 }}>
-              {fileName && (
-                  <div style={{ marginBottom: 8, color: "#555" }}>
-                    <strong>File:</strong> {fileName}
-                  </div>
+              {fileNames.length > 0 && (
+                <div style={{ marginBottom: 8, color: "#555" }}>
+                  <strong>Files:</strong> {fileNames.join(", ")}
+                </div>
               )}
 
               {result.averageMonthExpenses && (
