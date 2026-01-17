@@ -199,6 +199,47 @@ function buildCategoryPieChart(args: {
   };
 }
 
+/** Compute category totals and percentages for the whole period (all months in the analysis). */
+function computePeriodCategoryPercentages(monthlyExpenses: MonthlyExpense[]) {
+  const totals: Record<string, number> = {};
+  for (const m of monthlyExpenses) {
+    const monthTotals = extractMonthCategoryAmounts(m);
+    for (const [cat, amount] of Object.entries(monthTotals)) {
+      totals[cat] = (totals[cat] ?? 0) + amount;
+    }
+  }
+
+  const entries = Object.entries(totals)
+    .filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1]);
+
+  const grandTotal = entries.reduce((acc, [, v]) => acc + v, 0);
+
+  return entries.map(([category, total]) => ({
+    category,
+    total,
+    percent: grandTotal > 0 ? (total / grandTotal) * 100 : 0,
+  }));
+}
+
+/** Compute category totals and percentages for a single month. */
+function computeMonthCategoryPercentages(monthlyExpenses: MonthlyExpense[], selectedMonth: string) {
+  const monthObj = monthlyExpenses.find((m) => m.month === selectedMonth) ?? monthlyExpenses[0];
+  const totals = extractMonthCategoryAmounts(monthObj);
+
+  const entries = Object.entries(totals)
+    .filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1]);
+
+  const grandTotal = entries.reduce((acc, [, v]) => acc + v, 0);
+
+  return entries.map(([category, total]) => ({
+    category,
+    total,
+    percent: grandTotal > 0 ? (total / grandTotal) * 100 : 0,
+  }));
+}
+
 /**
  * Build the Chart.js config for category trends over time.
  * By default shows top N categories by total spend across all months.
@@ -535,6 +576,18 @@ function CategoryBreakdown(props: Readonly<{
           }),
       [props.monthlyExpenses, props.breakdownMode, props.selectedMonth]
   );
+  const yearRows = useMemo(
+    () => computePeriodCategoryPercentages(props.monthlyExpenses),
+    [props.monthlyExpenses]
+  );
+  const monthRows = useMemo(
+    () => computeMonthCategoryPercentages(props.monthlyExpenses, props.selectedMonth),
+    [props.monthlyExpenses, props.selectedMonth]
+  );
+  const categoryColors = useMemo(
+    () => buildCategoryColorMap(props.monthlyExpenses),
+    [props.monthlyExpenses]
+  );
 
   return (
       <div style={{ marginTop: 24, borderTop: "1px solid #eee", paddingTop: 16 }}>
@@ -566,11 +619,55 @@ function CategoryBreakdown(props: Readonly<{
 
         <div style={{ marginTop: 12 }}>
           {pie ? (
-              <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
-                <Pie data={pie.data} options={pie.options} />
-              </div>
+            <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12 }}>
+              <Pie data={pie.data} options={pie.options} />
+            </div>
           ) : (
-              <div>No category data found for this selection.</div>
+            <div>No category data found for this selection.</div>
+          )}
+
+          {(props.breakdownMode === "year" ? yearRows : monthRows).length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ color: "#555", fontWeight: 600, marginBottom: 6 }}>
+                {props.breakdownMode === "year"
+                  ? "Percentages for the whole period"
+                  : `Percentages for ${props.selectedMonth || props.monthlyExpenses[0]?.month}`}
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px" }}>
+                        Category
+                      </th>
+                      <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>
+                        Total
+                      </th>
+                      <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>
+                        %
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(props.breakdownMode === "year" ? yearRows : monthRows).map((r) => (
+                      <tr key={r.category}>
+                        <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3" }}>
+                          <span style={{ color: categoryColors[r.category] ?? "#555", fontWeight: 600 }}>
+                            {r.category}
+                          </span>
+                        </td>
+                        <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>
+                          € {r.total.toFixed(2)}
+                        </td>
+                        <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right" }}>
+                          {r.percent.toFixed(1)}%
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           )}
         </div>
       </div>
