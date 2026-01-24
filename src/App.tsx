@@ -140,6 +140,31 @@ function extractMonthCategoryAmounts(m: MonthlyExpense): Record<string, number> 
   return out;
 }
 
+
+/**
+ * Build a month-by-category matrix for a fixed set of category columns.
+ * Missing categories are treated as 0.
+ */
+function buildCategoryMatrix(monthlyExpenses: MonthlyExpense[], categoryKeys: string[]) {
+  const ordered = [...monthlyExpenses].sort((a, b) => a.month.localeCompare(b.month));
+
+  return ordered.map((m) => {
+    const monthTotals = extractMonthCategoryAmounts(m);
+
+    const row: Record<string, number> = {};
+    for (const key of categoryKeys) {
+      row[key] = monthTotals[key] ?? 0;
+    }
+
+    return {
+      month: m.month,
+      label: formatMonthLabel(m.month),
+      values: row,
+      sum: parseEuroAmount(m.sum),
+    };
+  });
+}
+
 /**
  * Build the Chart.js config for category breakdown.
  *
@@ -693,6 +718,71 @@ function CategoryBreakdown(props: Readonly<{
 function CategoryTrends({ monthlyExpenses }: Readonly<{ monthlyExpenses: MonthlyExpense[] }>) {
   const chart = useMemo(() => buildCategoryTrendsChart(monthlyExpenses, 6), [monthlyExpenses]);
 
+  const categoryKeys = useMemo(
+    () => [
+      "houseAndFurniture",
+      "food",
+      "carAndTransport",
+      "kids",
+      "insurance",
+      "travel",
+      "sportEatFun",
+      "health",
+      "other",
+    ],
+    []
+  );
+
+  const tableRows = useMemo(
+    () => buildCategoryMatrix(monthlyExpenses, categoryKeys),
+    [monthlyExpenses, categoryKeys]
+  );
+
+  const columnLabels: Record<string, string> = useMemo(
+    () => ({
+      houseAndFurniture: "houseAndFurniture",
+      food: "food",
+      carAndTransport: "carAndTransport",
+      kids: "kids",
+      insurance: "insurance",
+      travel: "travel",
+      sportEatFun: "sportEatFun",
+      health: "health",
+      other: "other",
+    }),
+    []
+  );
+
+  const avgRow = useMemo(() => {
+    const n = tableRows.length;
+
+    const sums: Record<string, number> = {};
+    const avgValues: Record<string, number> = {};
+
+    for (const k of categoryKeys) {
+      sums[k] = 0;
+    }
+
+    let sumTotal = 0;
+
+    for (const row of tableRows) {
+      for (const k of categoryKeys) {
+        sums[k] += row.values[k] ?? 0;
+      }
+      sumTotal += row.sum ?? 0;
+    }
+
+    for (const k of categoryKeys) {
+      avgValues[k] = n ? sums[k] / n : 0;
+    }
+
+    return {
+      label: "Average",
+      values: avgValues,
+      sum: n ? sumTotal / n : 0,
+    };
+  }, [tableRows, categoryKeys]);
+
   return (
     <div style={{ marginTop: 24, borderTop: "1px solid #eee", paddingTop: 16 }}>
       <h2 style={{ margin: "0 0 12px" }}>Category trends</h2>
@@ -701,6 +791,98 @@ function CategoryTrends({ monthlyExpenses }: Readonly<{ monthlyExpenses: Monthly
       </div>
       <div style={{ marginTop: 8, color: "#666", fontSize: 12 }}>
         Showing top 6 categories by total spend across the selected period (others grouped as "Other").
+      </div>
+
+      <div style={{ marginTop: 12 }}>
+        <h2 style={{ margin: "0 0 12px" }}>Monthly category totals</h2>
+
+        <div style={{ overflowX: "auto" }}>
+          <table
+            style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              minWidth: 980,
+              fontFamily: "inherit",
+              fontSize: 14,
+            }}
+          >
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>
+                  Month
+                </th>
+                {categoryKeys.map((k) => (
+                  <th
+                    key={k}
+                    style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}
+                  >
+                    {columnLabels[k]}
+                  </th>
+                ))}
+                <th style={{ textAlign: "right", borderBottom: "1px solid #eee", padding: "8px 6px", whiteSpace: "nowrap" }}>
+                  sum
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {tableRows.map((r) => (
+                <tr key={r.month}>
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", whiteSpace: "nowrap" }}>
+                    {r.label}
+                  </td>
+                  {categoryKeys.map((k) => (
+                    <td
+                      key={k}
+                      style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right", whiteSpace: "nowrap" }}
+                    >
+                      {"€\u00A0"}{(r.values[k] ?? 0).toFixed(2)}
+                    </td>
+                  ))}
+                  <td style={{ padding: "8px 6px", borderBottom: "1px solid #f3f3f3", textAlign: "right", whiteSpace: "nowrap" }}>
+                    {"€\u00A0"}{r.sum.toFixed(2)}
+                  </td>
+                </tr>
+              ))}
+              <tr>
+                <td
+                  style={{
+                    padding: "10px 6px",
+                    borderTop: "2px solid #e6e6e6",
+                    fontWeight: 700,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {avgRow.label}
+                </td>
+                {categoryKeys.map((k) => (
+                  <td
+                    key={`avg_${k}`}
+                    style={{
+                      padding: "10px 6px",
+                      borderTop: "2px solid #e6e6e6",
+                      textAlign: "right",
+                      whiteSpace: "nowrap",
+                      fontWeight: 700,
+                    }}
+                  >
+                    {"€\u00A0"}{(avgRow.values[k] ?? 0).toFixed(2)}
+                  </td>
+                ))}
+                <td
+                  style={{
+                    padding: "10px 6px",
+                    borderTop: "2px solid #e6e6e6",
+                    textAlign: "right",
+                    whiteSpace: "nowrap",
+                    fontWeight: 700,
+                  }}
+                >
+                  {"€\u00A0"}{avgRow.sum.toFixed(2)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
