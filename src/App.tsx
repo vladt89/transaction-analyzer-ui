@@ -36,7 +36,7 @@ ChartJS.register(
  * - App: state + orchestration (file upload -> analysis -> render)
  */
 // -------------------- Types --------------------
-type BankName = "Nordea" | "ING";
+type BankName = "Nordea" | "ING" | "Commerzbank";
 
 type MonthlyExpense = {
   month: string;
@@ -55,7 +55,14 @@ type AnalysisResult = {
 // -------------------- Helpers (pure) --------------------
 /** Infer bank type from the uploaded file name (MVP heuristic). */
 function detectBank(fileName: string): BankName {
-  return fileName.toLowerCase().includes("ing") ? "ING" : "Nordea";
+  const name = fileName.toLowerCase();
+  if (name.includes("commerz")) {
+    return "Commerzbank";
+  }
+  if (name.includes("ing")) {
+    return "ING";
+  }
+  return "Nordea";
 }
 
 /** Extract a numeric amount from strings like "1330.84 euros". */
